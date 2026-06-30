@@ -212,3 +212,23 @@ def admin_list_activations(
         .execute()
     )
     return result.data or []
+
+
+# ---------------------------------------------------------------------------
+# Admin: list all activations
+# ---------------------------------------------------------------------------
+@router.get("/admin/activations")
+def admin_list_activations(
+    x_admin_secret: str = Header(default=""),
+):
+    if not ADMIN_SECRET or x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    supabase = get_supabase()
+    result = (
+        supabase.table("pending_activations")
+        .select("*")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return result.data or []
