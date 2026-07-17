@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 
 from app.core.state import KommuneState
-from app.core.agents._shared import client, MODEL, NGO_MAP
+from google.genai import types
+from app.core.agents._shared import client, MODEL, NGO_MAP, _to_gemini_contents
 
 SYSTEM_PROMPT = f"""You are Nemo, the routing intelligence for Kommune,
 a platform that helps migrants in South Africa navigate legal, financial,
@@ -56,14 +57,18 @@ async def run_nemo_router(context: dict) -> dict:
 
     context_messages = history + [{"role": "user", "content": user_message}]
 
-    response = client.messages.create(
+    contents = _to_gemini_contents(context_messages)
+
+    response = client.models.generate_content(
         model=MODEL,
-        max_tokens=200,
-        system=SYSTEM_PROMPT,
-        messages=context_messages,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            max_output_tokens=200,
+        ),
     )
 
-    raw = response.content[0].text.strip()
+    raw = (response.text or "").strip()
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
     try:
