@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
+from typing import Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -15,35 +16,55 @@ logger = logging.getLogger("demo")
 
 DEMO_WHATSAPP_FALLBACK = os.environ.get("DEMO_WHATSAPP_NUMBER", "")
 
+Topic = Literal["asylum_permit", "citizenship"]
+
+CHECKLISTS: dict[Topic, str] = {
+    "asylum_permit": (
+        "Kommune \u2014 Section 22 Permit Renewal Checklist\n\n"
+        "1. Current (or most recently expired) Section 22 asylum permit\n"
+        "2. Proof of address (utility bill, affidavit, or letter from host)\n"
+        "3. Your Home Affairs reference/file number, if you have it\n"
+        "4. Any prior Refugee Reception Office appointment confirmation\n"
+        "5. Passport or ID from your country of origin, if available\n\n"
+        "Reply here and I'll help you book the next available renewal appointment."
+    ),
+    "citizenship": (
+        "Kommune \u2014 Section 4(3) Citizenship Application Checklist\n\n"
+        "(For a child born in South Africa to foreign national parents, "
+        "applying for citizenship on reaching majority \u2014 Citizenship "
+        "Amendment Act)\n\n"
+        "1. Unabridged South African birth certificate\n"
+        "2. Proof of continuous residence in South Africa since birth\n"
+        "3. Parents' identity/passport documents\n"
+        "4. School records covering the full residence period\n"
+        "5. Proof of registration of birth in the population register\n\n"
+        "Reply here and I'll help you prepare the application."
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Step 1: real WhatsApp checklist send
 # ---------------------------------------------------------------------------
 class SendChecklistPayload(BaseModel):
     phone_number: str | None = None  # E.164 without '+', e.g. "27821234567"
-
-
-CHECKLIST_MESSAGE = (
-    "Kommune Journey Checklist \u2014 Getting Started\n\n"
-    "1. ID document or asylum permit\n"
-    "2. Proof of residence (any recent utility bill or affidavit)\n"
-    "3. Highest school certificate you have\n"
-    "4. Any existing bank or mobile money account details\n\n"
-    "Reply here anytime and I'll walk you through the next step."
-)
+    topic: Topic = "asylum_permit"
 
 
 @router.post("/demo/send-checklist")
 async def send_checklist(payload: SendChecklistPayload):
     """Sends a REAL WhatsApp message using the same tool that powers
-    production WhatsApp - not a simulation. Used as the scripted action
-    beat in the live lawyer demo."""
+    production WhatsApp - not a simulation. Topic is chosen explicitly by
+    the presenter (not auto-detected) to match whatever was actually
+    discussed in the live conversation."""
     to_number = payload.phone_number or DEMO_WHATSAPP_FALLBACK
     if not to_number:
         return {"status": "error", "error": "No phone number provided and DEMO_WHATSAPP_NUMBER not set."}
 
+    message = CHECKLISTS[payload.topic]
+
     try:
-        result = await send_whatsapp_messages_chunked(to_number, CHECKLIST_MESSAGE)
+        result = await send_whatsapp_messages_chunked(to_number, message)
         return {"status": "sent", "to": to_number, "result": result}
     except Exception as e:
         logger.exception("Demo WhatsApp send failed")
@@ -56,23 +77,47 @@ async def send_checklist(payload: SendChecklistPayload):
 # inbox in front of an audience)
 # ---------------------------------------------------------------------------
 class DraftEmailPayload(BaseModel):
-    student_context: str = (
-        "An 18-year-old who just finished school, asking about bursary "
-        "and further education options in South Africa."
-    )
+    topic: Topic = "asylum_permit"
 
 
-FALLBACK_DRAFT = {
-    "subject": "Bursary Application Inquiry \u2014 Getting Started",
-    "body": (
-        "To Whom It May Concern,\n\n"
-        "I recently completed my schooling and am seeking information about "
-        "bursary opportunities available to me. I would appreciate guidance "
-        "on the application process, required documents, and any upcoming "
-        "deadlines.\n\n"
-        "Thank you for your time and assistance.\n\n"
-        "Kind regards"
+EMAIL_PROMPTS: dict[Topic, str] = {
+    "asylum_permit": (
+        "Draft a short, professional email to a Refugee Reception Office "
+        "requesting a Section 22 asylum permit renewal appointment (under 120 words)."
     ),
+    "citizenship": (
+        "Draft a short, professional email to Home Affairs requesting guidance "
+        "on a Section 4(3) citizenship application for a person born in South "
+        "Africa to foreign national parents, now reaching majority (under 120 words)."
+    ),
+}
+
+FALLBACK_DRAFTS: dict[Topic, dict[str, str]] = {
+    "asylum_permit": {
+        "subject": "Request for Section 22 Permit Renewal Appointment",
+        "body": (
+            "To the Refugee Reception Office,\n\n"
+            "My Section 22 asylum seeker permit has expired and I would like to "
+            "request an appointment to renew it as soon as possible. Please "
+            "advise which documents I should bring and whether any appointment "
+            "slots are currently available.\n\n"
+            "Thank you for your assistance.\n\n"
+            "Kind regards"
+        ),
+    },
+    "citizenship": {
+        "subject": "Inquiry \u2014 Section 4(3) Citizenship Application",
+        "body": (
+            "To Whom It May Concern,\n\n"
+            "I was born in South Africa to foreign national parents and have "
+            "lived here continuously since birth. Having now reached the age "
+            "of majority, I would like guidance on applying for citizenship "
+            "under Section 4(3) of the Citizenship Amendment Act, including "
+            "which documents are required.\n\n"
+            "Thank you for your assistance.\n\n"
+            "Kind regards"
+        ),
+    },
 }
 
 
@@ -81,11 +126,10 @@ async def draft_email(payload: DraftEmailPayload):
     """Generates a real drafted email using the same model/client as the
     live agents. Displayed on screen only - not sent - so a slow or failed
     generation never breaks the live demo (falls back to a solid static
-    draft instead of erroring)."""
+    draft instead of erroring). Topic chosen explicitly by the presenter."""
     prompt = (
-        "Draft a short, professional bursary inquiry email (under 120 words) "
-        f"for this situation: {payload.student_context}\n\n"
-        "Respond ONLY as JSON: {\"subject\": \"...\", \"body\": \"...\"}. "
+        EMAIL_PROMPTS[payload.topic]
+        + "\n\nRespond ONLY as JSON: {\"subject\": \"...\", \"body\": \"...\"}. "
         "No markdown, no code fences, no extra text."
     )
 
@@ -106,4 +150,4 @@ async def draft_email(payload: DraftEmailPayload):
 
     except Exception as e:
         logger.warning(f"Draft email generation failed, using fallback: {e}")
-        return {"status": "ok", **FALLBACK_DRAFT}
+        return {"status": "ok", **FALLBACK_DRAFTS[payload.topic]}
