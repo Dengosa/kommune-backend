@@ -271,6 +271,111 @@ def call_agent_with_tools(
     return final_text, tool_calls_log
 
 
+# ---------------------------------------------------------------------------
+# Streaming tool-calling loop - for the real-time voice pipeline ONLY.
+# This is additive: call_agent_with_tools above is untouched and keeps
+# powering web chat and WhatsApp exactly as before. Only the voice endpoint
+# uses this async streaming version, so nothing already working is at risk.
+# ---------------------------------------------------------------------------
+async def call_agent_with_tools_stream(
+    system_prompt: str,
+    messages: list[dict],
+    tools: list[dict],
+    max_tokens: int = 1536,
+    max_iterations: int = 5,
+):
+    """Async generator version of call_agent_with_tools.
+
+    Yields dicts as the response streams in:
+      {"type": "delta", "text": str}          - a chunk of response text
+      {"type": "done", "final_text": str, "tool_calls_log": list}  - final event
+
+    Tool calls still happen mid-loop exactly as in the blocking version -
+    Gemini's function calls arrive as complete parts (not streamed token by
+    token), so we execute them and continue the loop, streaming text deltas
+    from every iteration as they arrive.
+    """
+    from app.core.tools.registry import execute_tool
+
+    contents = _to_gemini_contents(messages)
+    tool_calls_log: list[dict] = []
+
+    gemini_tools = []
+    has_search = any(t.get("type") == "web_search_20250305" or t.get("name") == "web_search" for t in tools)
+    function_tools = [t for t in tools if t.get("name") not in (None, "web_search") and "input_schema" in t]
+
+    if has_search:
+        gemini_tools.append(types.Tool(google_search=types.GoogleSearch()))
+
+    if function_tools:
+        declarations = [
+            types.FunctionDeclaration(
+                name=t["name"],
+                description=t.get("description", ""),
+                parameters=_to_gemini_schema(t["input_schema"]),
+            )
+            for t in function_tools
+        ]
+        gemini_tools.append(types.Tool(function_declarations=declarations))
+
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        max_output_tokens=max_tokens,
+        tools=gemini_tools if gemini_tools else None,
+    )
+
+    final_text = ""
+
+    for _ in range(max_iterations):
+        iteration_text_parts: list[str] = []
+        function_calls = []
+        last_candidate_content = None
+
+        stream = await client.aio.models.generate_content_stream(
+            model=MODEL,
+            contents=contents,
+            config=config,
+        )
+
+        async for chunk in stream:
+            candidate = chunk.candidates[0] if chunk.candidates else None
+            if not candidate or not candidate.content:
+                continue
+            last_candidate_content = candidate.content
+            for part in candidate.content.parts:
+                if getattr(part, "text", None):
+                    iteration_text_parts.append(part.text)
+                    yield {"type": "delta", "text": part.text}
+                if getattr(part, "function_call", None):
+                    function_calls.append(part.function_call)
+
+        iteration_text = "".join(iteration_text_parts)
+        if iteration_text:
+            final_text = iteration_text
+
+        if not function_calls:
+            yield {"type": "done", "final_text": final_text, "tool_calls_log": tool_calls_log}
+            return
+
+        if last_candidate_content is not None:
+            contents.append(last_candidate_content)
+
+        response_parts = []
+        for fc in function_calls:
+            tool_input = dict(fc.args) if fc.args else {}
+            result = execute_tool(fc.name, tool_input)
+            tool_calls_log.append({"tool": fc.name, "input": tool_input, "result": result})
+            response_parts.append(
+                types.Part.from_function_response(
+                    name=fc.name,
+                    response={"result": result},
+                )
+            )
+        contents.append(types.Content(role="user", parts=response_parts))
+
+    yield {"type": "done", "final_text": final_text, "tool_calls_log": tool_calls_log}
+
+
 def _to_gemini_schema(input_schema: dict) -> types.Schema:
     """Convert our internal JSON-schema-style tool input_schema into a
     Gemini types.Schema object."""
