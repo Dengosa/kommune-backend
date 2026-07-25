@@ -331,7 +331,7 @@ async def call_agent_with_tools_stream(
         function_calls = []
         last_candidate_content = None
 
-        stream = await client.aio.models.generate_content_stream(
+        stream = client.aio.models.generate_content_stream(
             model=MODEL,
             contents=contents,
             config=config,
