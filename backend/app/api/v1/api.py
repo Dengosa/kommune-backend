@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import chat, waitlist, activation, vault, whatsapp, sms, demo
+from app.api.v1.endpoints import chat, waitlist, activation, vault, whatsapp, sms, demo, voice
 
 api_router = APIRouter()
 
@@ -13,3 +13,4 @@ api_router.include_router(vault.router, tags=["vault"])
 api_router.include_router(whatsapp.router, tags=["whatsapp"])
 api_router.include_router(sms.router, tags=["sms"])
 api_router.include_router(demo.router, tags=["demo"])
+api_router.include_router(voice.router, tags=["voice"])
