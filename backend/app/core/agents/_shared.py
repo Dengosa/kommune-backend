@@ -203,7 +203,7 @@ def call_agent_with_tools(
     has_search = any(t.get("type") == "web_search_20250305" or t.get("name") == "web_search" for t in tools)
     function_tools = [t for t in tools if t.get("name") not in (None, "web_search") and "input_schema" in t]
 
-    if has_search:
+    if has_search and not function_tools:
         gemini_tools.append(types.Tool(google_search=types.GoogleSearch()))
 
     if function_tools:
@@ -304,7 +304,7 @@ async def call_agent_with_tools_stream(
     has_search = any(t.get("type") == "web_search_20250305" or t.get("name") == "web_search" for t in tools)
     function_tools = [t for t in tools if t.get("name") not in (None, "web_search") and "input_schema" in t]
 
-    if has_search:
+    if has_search and not function_tools:
         gemini_tools.append(types.Tool(google_search=types.GoogleSearch()))
 
     if function_tools:
