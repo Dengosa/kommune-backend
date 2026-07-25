@@ -8,10 +8,16 @@ import logging
 import websockets
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.core.agents._shared import call_agent_with_tools_stream, extract_emergency, extract_priority, extract_handoff
+from app.core.agents.legal import SYSTEM_PROMPT as LEGAL_SYSTEM_PROMPT
+from app.core.tools.registry import get_tools_for_agent
+
 router = APIRouter()
 logger = logging.getLogger("voice")
 
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # "Rachel" - a natural default voice
 
 # Using Deepgram's raw WebSocket protocol directly (not the SDK) so this
 # endpoint doesn't break every time Deepgram ships a new SDK major version -
@@ -22,26 +28,66 @@ DEEPGRAM_WS_URL = (
     "&language=en"
     "&smart_format=true"
     "&interim_results=true"
+    "&endpointing=500"          # stop waiting after 500ms of silence - marks end of utterance
     "&encoding=linear16"
     "&sample_rate=16000"
 )
+
+ELEVENLABS_STREAM_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream"
+
+
+async def _speak_sentence(text: str, websocket: WebSocket):
+    """Send one sentence to ElevenLabs and stream the resulting audio bytes
+    straight back to the browser. Silently does nothing if no API key is
+    set yet - the moment ELEVENLABS_API_KEY is added to the environment,
+    this activates with no code change needed."""
+    if not ELEVENLABS_API_KEY or not text.strip():
+        return
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            async with http_client.stream(
+                "POST",
+                ELEVENLABS_STREAM_URL,
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "text": text,
+                    "model_id": "eleven_turbo_v2_5",
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                },
+            ) as response:
+                if response.status_code != 200:
+                    body = await response.aread()
+                    logger.warning(f"ElevenLabs TTS failed ({response.status_code}): {body[:200]}")
+                    return
+                await websocket.send_json({"type": "audio_start"})
+                async for chunk in response.aiter_bytes(chunk_size=4096):
+                    await websocket.send_bytes(chunk)
+                await websocket.send_json({"type": "audio_end"})
+    except Exception:
+        logger.exception("ElevenLabs TTS call failed")
 
 
 @router.websocket("/voice/stream")
 async def voice_stream(websocket: WebSocket):
     """
-    PHASE 1 ONLY: live speech-to-text, nothing else.
+    Real-time voice pipeline: browser mic -> Deepgram (live STT) -> streaming
+    Gemini agent (Lex, with real tools) -> ElevenLabs (streaming TTS) -> browser.
 
-    Browser sends raw 16-bit PCM audio chunks (16kHz, mono) over this
-    WebSocket. We forward them to Deepgram's live transcription API and
-    relay transcripts back to the browser as JSON:
-
-        {"type": "transcript", "text": "...", "is_final": true|false}
+    Messages sent to the browser:
+        {"type": "transcript", "text": "...", "is_final": bool}
+        {"type": "agent_delta", "text": "..."}       - streamed response text
+        {"type": "agent_done", "emergency": str|None, "priority": str|None}
+        {"type": "audio_start"} / raw audio bytes / {"type": "audio_end"}
         {"type": "error", "message": "..."}
 
-    This does NOT yet call the Kommune agent graph or any TTS - that's
-    Phase 2 (agent streaming) and Phase 3 (text-to-speech), built and
-    tested separately once this phase is confirmed working end to end.
+    If ELEVENLABS_API_KEY isn't set yet, everything above still works except
+    audio playback - text still streams so this is testable today.
     """
     await websocket.accept()
 
@@ -50,26 +96,88 @@ async def voice_stream(websocket: WebSocket):
         await websocket.close()
         return
 
+    conversation_history: list[dict] = []
+
     try:
+        logger.info("Connecting to Deepgram...")
         async with websockets.connect(
             DEEPGRAM_WS_URL,
             additional_headers={"Authorization": f"Token {DEEPGRAM_API_KEY}"},
         ) as dg_socket:
+            logger.info("Connected to Deepgram successfully")
 
             async def relay_browser_audio_to_deepgram():
-                """Forward raw audio bytes from the browser straight to Deepgram."""
+                first_chunk_logged = False
                 try:
                     while True:
                         data = await websocket.receive_bytes()
+                        if not first_chunk_logged:
+                            logger.info(f"Received first audio chunk from browser ({len(data)} bytes)")
+                            first_chunk_logged = True
                         await dg_socket.send(data)
                 except WebSocketDisconnect:
-                    # Browser closed the mic / left the page - tell Deepgram
-                    # we're done sending audio so it flushes any final result.
+                    logger.info("Browser disconnected, closing Deepgram stream")
                     await dg_socket.send(json.dumps({"type": "CloseStream"}))
 
+            async def handle_final_transcript(user_text: str):
+                """A complete utterance came in - run it through the real
+                streaming agent and speak the response back."""
+                logger.info(f"Final transcript received: {user_text!r} - calling agent")
+                await websocket.send_json({"type": "transcript", "text": user_text, "is_final": True})
+
+                conversation_history.append({"role": "user", "content": user_text})
+                tools = get_tools_for_agent("legal", preview_mode=False)
+
+                full_text = ""
+                sentence_buffer = ""
+                first_event_logged = False
+
+                async for event in call_agent_with_tools_stream(
+                    LEGAL_SYSTEM_PROMPT, conversation_history, tools
+                ):
+                    if not first_event_logged:
+                        logger.info(f"First agent stream event received: {event['type']}")
+                        first_event_logged = True
+
+                    if event["type"] == "delta":
+                        full_text += event["text"]
+                        sentence_buffer += event["text"]
+                        await websocket.send_json({"type": "agent_delta", "text": event["text"]})
+
+                        # Speak as soon as we have a full sentence, rather than
+                        # waiting for the entire response - this is what
+                        # actually removes the "long silence" problem.
+                        for terminator in (". ", "! ", "? ", "\n"):
+                            if terminator in sentence_buffer:
+                                idx = sentence_buffer.rindex(terminator) + len(terminator)
+                                to_speak, sentence_buffer = sentence_buffer[:idx], sentence_buffer[idx:]
+                                asyncio.create_task(_speak_sentence(to_speak, websocket))
+                                break
+
+                    elif event["type"] == "done":
+                        logger.info(f"Agent stream done. Full text length: {len(full_text)}")
+                        if sentence_buffer.strip():
+                            asyncio.create_task(_speak_sentence(sentence_buffer, websocket))
+
+                clean_text, emergency_reason = extract_emergency(full_text)
+                clean_text, priority_reason = extract_priority(clean_text)
+                clean_text, _handoff = extract_handoff(clean_text)
+
+                conversation_history.append({"role": "assistant", "content": clean_text})
+                await websocket.send_json({
+                    "type": "agent_done",
+                    "emergency": emergency_reason,
+                    "priority": priority_reason,
+                })
+                logger.info("agent_done sent to browser")
+
             async def relay_deepgram_transcripts_to_browser():
-                """Forward Deepgram's transcript messages back to the browser."""
+                first_message_logged = False
                 async for message in dg_socket:
+                    if not first_message_logged:
+                        logger.info(f"First message received from Deepgram: {str(message)[:200]}")
+                        first_message_logged = True
+
                     try:
                         result = json.loads(message)
                     except json.JSONDecodeError:
@@ -78,22 +186,19 @@ async def voice_stream(websocket: WebSocket):
                     channel = result.get("channel")
                     if not channel:
                         continue
-
                     alternatives = channel.get("alternatives", [])
                     if not alternatives:
                         continue
-
                     transcript = alternatives[0].get("transcript", "")
                     if not transcript:
                         continue
 
-                    await websocket.send_json({
-                        "type": "transcript",
-                        "text": transcript,
-                        "is_final": result.get("is_final", False),
-                    })
+                    is_final = result.get("is_final", False)
+                    if is_final:
+                        await handle_final_transcript(transcript)
+                    else:
+                        await websocket.send_json({"type": "transcript", "text": transcript, "is_final": False})
 
-            # Run both directions concurrently until either side closes.
             await asyncio.gather(
                 relay_browser_audio_to_deepgram(),
                 relay_deepgram_transcripts_to_browser(),
@@ -102,12 +207,12 @@ async def voice_stream(websocket: WebSocket):
     except websockets.exceptions.InvalidStatusCode as e:
         logger.exception("Deepgram rejected the connection")
         await websocket.send_json({"type": "error", "message": f"Deepgram connection failed: {e}"})
-    except Exception as e:
+    except Exception:
         logger.exception("Voice stream crashed")
         try:
             await websocket.send_json({"type": "error", "message": "Voice connection failed unexpectedly."})
         except Exception:
-            pass  # socket may already be closed
+            pass
     finally:
         try:
             await websocket.close()
