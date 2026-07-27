@@ -51,6 +51,34 @@ SEND_EMAIL_TOOL = {
     },
 }
 
+SCHEDULE_APPOINTMENT_TOOL = {
+    "name": "schedule_appointment",
+    "description": (
+        "Send the user a calendar invite (.ics file via email) for an "
+        "appointment — e.g. a legal aid consultation, DHA appointment, or "
+        "follow-up reminder. Only use this when the user has provided their "
+        "email and confirmed they want a calendar reminder."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "to_email": {"type": "string", "description": "User's email address"},
+            "title": {"type": "string", "description": "Short event title"},
+            "description": {"type": "string", "description": "Event details/notes"},
+            "location": {"type": "string", "description": "Location or 'Online'/'Phone call'"},
+            "start_iso": {
+                "type": "string",
+                "description": "Start date/time in ISO 8601 format, e.g. 2026-06-20T10:00:00",
+            },
+            "duration_minutes": {
+                "type": "integer",
+                "description": "Duration in minutes (default 30)",
+            },
+        },
+        "required": ["to_email", "title", "description", "location", "start_iso"],
+    },
+}
+
 SEND_SMS_TOOL = {
     "name": "send_sms",
     "description": (
