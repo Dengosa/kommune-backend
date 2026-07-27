@@ -59,3 +59,35 @@ async def send_whatsapp_messages_chunked(to: str, text: str, max_len: int = 4000
     for chunk in chunks:
         results.append(await send_whatsapp_message(to, chunk))
     return results
+
+
+def send_whatsapp_message_sync(to: str, text: str) -> dict:
+    """Sync-safe sibling of send_whatsapp_message, for use inside the
+    synchronous execute_tool dispatch (agent tool-calling loop). Uses a
+    blocking httpx.Client rather than AsyncClient - kept separate from the
+    async version above so the existing async callers (webhook, voice
+    pipeline) are completely untouched."""
+    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+        return {"status": "error", "error": "WhatsApp not configured"}
+
+    url = f"{GRAPH_API_BASE}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text},
+    }
+
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            return {"status": "sent", "result": resp.json()}
+    except httpx.HTTPStatusError as e:
+        return {"status": "error", "error": str(e), "response": e.response.text}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}

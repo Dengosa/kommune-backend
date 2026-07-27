@@ -60,3 +60,31 @@ async def send_sms_chunked(to: str, body: str, max_len: int = 1500) -> list[dict
     for chunk in chunks:
         results.append(await send_sms(to, chunk))
     return results
+
+
+def send_sms_sync(to: str, body: str) -> dict:
+    """Sync-safe sibling of send_sms, for use inside the synchronous
+    execute_tool dispatch (agent tool-calling loop). Uses a blocking
+    httpx.Client rather than AsyncClient. Returns a clear "not configured"
+    error until TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM_NUMBER are set - safe
+    no-op, not a crash, if SMS isn't set up yet."""
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER):
+        return {"status": "error", "error": "Twilio not configured"}
+
+    url = f"{TWILIO_API_BASE}/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    auth = base64.b64encode(f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {auth}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    data = {"From": TWILIO_FROM_NUMBER, "To": to, "Body": body}
+
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(url, headers=headers, data=data)
+            resp.raise_for_status()
+            return {"status": "sent", "result": resp.json()}
+    except httpx.HTTPStatusError as e:
+        return {"status": "error", "error": str(e), "response": e.response.text}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
