@@ -91,3 +91,59 @@ def send_whatsapp_message_sync(to: str, text: str) -> dict:
         return {"status": "error", "error": str(e), "response": e.response.text}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+async def download_whatsapp_media(media_id: str) -> bytes:
+    """Fetch the raw bytes of an incoming WhatsApp media attachment
+    (e.g. a voice note) given its media id from the webhook payload."""
+    if not WHATSAPP_TOKEN:
+        raise RuntimeError("WhatsApp not configured")
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        meta_resp = await client.get(f"{GRAPH_API_BASE}/{media_id}", headers=headers)
+        meta_resp.raise_for_status()
+        media_url = meta_resp.json()["url"]
+        media_resp = await client.get(media_url, headers=headers)
+        media_resp.raise_for_status()
+        return media_resp.content
+
+
+async def upload_whatsapp_audio(audio_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
+    """Upload generated audio (e.g. a Fish Audio TTS reply) to WhatsApp's
+    media store and return the media id, needed before it can be sent."""
+    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+        raise RuntimeError("WhatsApp not configured")
+    url = f"{GRAPH_API_BASE}/{WHATSAPP_PHONE_NUMBER_ID}/media"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    files = {"file": ("reply.mp3", audio_bytes, mime_type)}
+    data = {"messaging_product": "whatsapp", "type": mime_type}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, headers=headers, files=files, data=data)
+        resp.raise_for_status()
+        return resp.json()["id"]
+
+
+async def send_whatsapp_audio_message(to: str, media_id: str) -> dict:
+    """Send a previously-uploaded audio file as a WhatsApp voice note."""
+    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+        return {"status": "error", "error": "WhatsApp not configured"}
+    url = f"{GRAPH_API_BASE}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "audio",
+        "audio": {"id": media_id},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            return {"status": "sent", "result": resp.json()}
+    except httpx.HTTPStatusError as e:
+        return {"status": "error", "error": str(e), "response": e.response.text}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}

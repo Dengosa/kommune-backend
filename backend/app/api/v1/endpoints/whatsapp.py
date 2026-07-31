@@ -7,7 +7,13 @@ from fastapi import APIRouter, Request, Response, Query, BackgroundTasks
 
 from app.core.state import new_state
 from app.core.agent_graph import run_agent_graph
-from app.core.tools.whatsapp_tool import send_whatsapp_messages_chunked
+from app.core.tools.whatsapp_tool import (
+    send_whatsapp_messages_chunked,
+    download_whatsapp_media,
+    upload_whatsapp_audio,
+    send_whatsapp_audio_message,
+)
+from app.core.tools.fish_voice import synthesize_reply, transcribe_voice_note
 
 router = APIRouter()
 logger = logging.getLogger("whatsapp")
@@ -54,11 +60,17 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
         from_number = message.get("from")  # e.g. "27821234567"
         msg_type = message.get("type")
 
+        if msg_type == "audio":
+            media_id = message.get("audio", {}).get("id")
+            if media_id:
+                background_tasks.add_task(_process_and_reply_voice, from_number, media_id)
+            return {"status": "ok"}
+
         if msg_type != "text":
             background_tasks.add_task(
                 send_whatsapp_messages_chunked,
                 from_number,
-                "Sorry, I can currently only read text messages. Please send your question as text.",
+                "Sorry, I can currently only read text and voice messages. Please send your question as text or a voice note.",
             )
             return {"status": "ok"}
 

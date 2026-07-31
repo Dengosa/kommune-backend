@@ -16,8 +16,8 @@ router = APIRouter()
 logger = logging.getLogger("voice")
 
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # "Rachel" - a natural default voice
+FISH_API_KEY = os.environ.get("FISH_API_KEY", "")
+FISH_VOICE_ID = os.environ.get("FISH_VOICE_ID", "")
 
 # Using Deepgram's raw WebSocket protocol directly (not the SDK) so this
 # endpoint doesn't break every time Deepgram ships a new SDK major version -
@@ -33,44 +33,26 @@ DEEPGRAM_WS_URL = (
     "&sample_rate=16000"
 )
 
-ELEVENLABS_STREAM_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream"
-
-
 async def _speak_sentence(text: str, websocket: WebSocket):
-    """Send one sentence to ElevenLabs and stream the resulting audio bytes
+    """Send one sentence to Fish Audio and stream the resulting audio bytes
     straight back to the browser. Silently does nothing if no API key is
-    set yet - the moment ELEVENLABS_API_KEY is added to the environment,
-    this activates with no code change needed."""
-    if not ELEVENLABS_API_KEY or not text.strip():
+    set yet - the moment FISH_API_KEY is added to the environment, this
+    activates with no code change needed."""
+    if not FISH_API_KEY or not text.strip():
         return
 
-    import httpx
+    from fishaudio import AsyncFishAudio
+    from fishaudio.types import TTSConfig
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as http_client:
-            async with http_client.stream(
-                "POST",
-                ELEVENLABS_STREAM_URL,
-                headers={
-                    "xi-api-key": ELEVENLABS_API_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "model_id": "eleven_turbo_v2_5",
-                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-                },
-            ) as response:
-                if response.status_code != 200:
-                    body = await response.aread()
-                    logger.warning(f"ElevenLabs TTS failed ({response.status_code}): {body[:200]}")
-                    return
-                await websocket.send_json({"type": "audio_start"})
-                async for chunk in response.aiter_bytes(chunk_size=4096):
-                    await websocket.send_bytes(chunk)
-                await websocket.send_json({"type": "audio_end"})
+        client = AsyncFishAudio(api_key=FISH_API_KEY)
+        config = TTSConfig(reference_id=FISH_VOICE_ID, format="mp3") if FISH_VOICE_ID else None
+        await websocket.send_json({"type": "audio_start"})
+        async for chunk in client.tts.stream(text=text, config=config):
+            await websocket.send_bytes(chunk)
+        await websocket.send_json({"type": "audio_end"})
     except Exception:
-        logger.exception("ElevenLabs TTS call failed")
+        logger.exception("Fish Audio TTS call failed")
 
 
 @router.websocket("/voice/stream")
@@ -86,7 +68,7 @@ async def voice_stream(websocket: WebSocket):
         {"type": "audio_start"} / raw audio bytes / {"type": "audio_end"}
         {"type": "error", "message": "..."}
 
-    If ELEVENLABS_API_KEY isn't set yet, everything above still works except
+    If FISH_API_KEY isn't set yet, everything above still works except
     audio playback - text still streams so this is testable today.
     """
     await websocket.accept()
