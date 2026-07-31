@@ -14,4 +14,6 @@ api_router.include_router(whatsapp.router, tags=["whatsapp"])
 api_router.include_router(sms.router, tags=["sms"])
 api_router.include_router(demo.router, tags=["demo"])
 api_router.include_router(voice.router, tags=["voice"])
-\n\napi_router.include_router(checkout.router, tags=["checkout"])\n
+
+
+api_router.include_router(checkout.router, tags=["checkout"])
