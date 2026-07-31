@@ -53,6 +53,9 @@ def _generate_reference() -> str:
 class ActivationRequest(BaseModel):
     email: Optional[EmailStr] = None
     whatsapp_number: Optional[str] = None
+    plan: str = "solo"  # "solo" | "spotme"
+    spot_email: Optional[str] = None
+    spot_message: Optional[str] = None
 
 
 class ActivationRequestResponse(BaseModel):
@@ -80,6 +83,9 @@ def request_activation(payload: ActivationRequest):
                 "whatsapp_number": payload.whatsapp_number,
                 "reference": reference,
                 "status": "pending",
+                "plan": payload.plan,
+                "spot_email": payload.spot_email,
+                "spot_message": payload.spot_message,
             }
         ).execute()
     except Exception as e:
