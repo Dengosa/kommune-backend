@@ -48,7 +48,7 @@ async def _speak_sentence(text: str, websocket: WebSocket):
         client = AsyncFishAudio(api_key=FISH_API_KEY)
         config = TTSConfig(reference_id=FISH_VOICE_ID, format="mp3") if FISH_VOICE_ID else None
         await websocket.send_json({"type": "audio_start"})
-        async for chunk in client.tts.stream(text=text, config=config):
+        async for chunk in await client.tts.stream(text=text, config=config):
             await websocket.send_bytes(chunk)
         await websocket.send_json({"type": "audio_end"})
     except Exception:
