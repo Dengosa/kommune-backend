@@ -153,15 +153,19 @@ DRAFT_LETTER_TOOL = {
 def get_tools_for_agent(agent_name: str, preview_mode: bool = False) -> list[dict]:
     """Return the tool set available to a given specialist agent.
 
-    Legal (Lex) gets the full action toolkit: web search, email, calendar.
-    Other agents currently get web search only; can be extended similarly.
+    All four specialist agents (legal, education, finance, health) get the
+    full action toolkit: web search, email, calendar, SMS, WhatsApp, and
+    letter drafting. Any future agent not in this list falls back to
+    web search only.
 
     `preview_mode=True` (unactivated users in their free preview) disables
-    action tools (send_email, schedule_appointment) — agents can still give
-    full informational answers and web search, but cannot execute actions
-    until the user activates their account.
+    action tools (send_email, schedule_appointment, etc.) — agents can
+    still give full informational answers and web search, but cannot
+    execute actions until the user activates their account.
     """
-    if agent_name == "legal":
+    ACTION_AGENTS = {"legal", "education", "finance", "health"}
+
+    if agent_name in ACTION_AGENTS:
         if preview_mode:
             return [WEB_SEARCH_TOOL]
         return [
